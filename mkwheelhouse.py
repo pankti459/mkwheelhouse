@@ -14,8 +14,8 @@ import subprocess
 import tempfile
 from six.moves.urllib.parse import urlparse
 
-import boto
-import boto.s3.connection
+import boto3
+import botocore
 import yattag
 
 
@@ -26,79 +26,48 @@ class Bucket(object):
         url = urlparse(url)
         self.name = url.netloc
         self.prefix = url.path.lstrip('/')
-        # Boto currently can't handle names with dots unless the region
-        # is specified explicitly.
-        # See: https://github.com/boto/boto/issues/2836
-        self.region = self._get_region()
-        self.s3 = boto.s3.connect_to_region(
-            region_name=self.region,
-            calling_format=boto.s3.connection.OrdinaryCallingFormat())
-        self.bucket = self.s3.get_bucket(self.name)
-
-    def _get_region(self):
-        # S3, for what appears to be backwards-compatibility
-        # reasons, maintains a distinction between location
-        # constraints and region endpoints. Newer regions have
-        # equivalent regions and location constraints, so we
-        # hardcode the non-equivalent regions here with hopefully no
-        # automatic support future S3 regions.
-        #
-        # Note also that someday, Boto should handle this for us
-        # instead of the AWS command line tools.
-        process = subprocess.Popen([
-            'aws', 's3api', 'get-bucket-location',
-            '--bucket', self.name], stdout=subprocess.PIPE)
-        stdout, _ = process.communicate()
-        location = json.loads(stdout.decode())['LocationConstraint']
-        if not location:
-            return 'us-east-1'
-        elif location == 'EU':
-            return 'eu-west-1'
-        else:
-            return location
-
-    def get_key(self, key):
-        if not isinstance(key, boto.s3.key.Key):
-            return boto.s3.key.Key(bucket=self.bucket,
-                                   name=os.path.join(self.prefix, key))
-        return key
+        self.s3_client = boto3.client('s3')
+        self.s3 = boto3.resource('s3')
+        self.bucket = self.s3.Bucket(self.name)
 
     def has_key(self, key):
-        return self.get_key(key).exists()
+        try:
+            print(self.s3.Object(self.name, os.path.join(self.prefix, key)))
+            self.s3.Object(self.name, os.path.join(self.prefix, key)).load()
+        except botocore.exceptions.ClientError as e:
+            return False
+        return True
 
     def generate_url(self, key):
-        key = self.get_key(key)
-        return key.generate_url(expires_in=0, query_auth=False)
+        index_url = self.s3_client.generate_presigned_url('get_object', Params={'Bucket': "careerleaf-wheelhouse",
+                                                            'Key': key},)
+        return index_url.split('?')[0]
 
     def list(self):
-        return self.bucket.list(prefix=self.prefix)
+        client = boto3.client('s3')
+        return client.list_objects( Bucket=self.name, Prefix=self.prefix )['Contents']
 
     def sync(self, local_dir):
         return subprocess.check_call([
             'aws', 's3', 'sync',
             local_dir, 's3://{0}/{1}'.format(self.name, self.prefix),
-            '--region', self.region])
+            '--region', 'us-east-1'])
 
-    def put(self, body, key):
-        key = self.get_key(key)
-
-        content_type = mimetypes.guess_type(key.name)[0]
-        if content_type:
-            key.content_type = content_type
-
-        key.set_contents_from_string(body, replace=True)
+    def put(self, file, key, type=None):
+        content_type = mimetypes.guess_type(file)[0]
+        self.bucket.upload_file(file, os.path.join(self.prefix, key),ExtraArgs={
+        'ContentType': content_type, 'ACL': 'public-read',})
 
     def list_wheels(self):
-        return [key for key in self.list() if key.name.endswith('.whl')]
+        return [key['Key'] for key in self.list() if key['Key'].endswith('.whl')]
 
     def make_index(self):
         doc, tag, text = yattag.Doc().tagtext()
         with tag('html'):
             for key in self.list_wheels():
                 with tag('a', href=self.generate_url(key)):
-                    text(key.name)
+                    text(key)
                 doc.stag('br')
-
         return doc.getvalue()
 
 
@@ -109,8 +78,6 @@ def build_wheels(packages, index_url, requirements, exclusions):
         'pip', 'wheel',
         '--wheel-dir', temp_dir,
         '--find-links', index_url,
-        # pip < 7 doesn't invalidate HTTP cache based on last-modified
-        # header, so disable it.
         '--no-cache-dir'
     ]
 
@@ -141,25 +108,25 @@ def main():
     parser.add_argument('package', nargs='*', default=[])
 
     args = parser.parse_args()
-
+    print(args.package)
     if not args.requirement and not args.package:
         parser.error('specify at least one requirements file or package')
 
     bucket = Bucket(args.bucket)
-
+    file=open("index.html",'w')
+    file.write('<!DOCTYPE html><html></html>')
     if not bucket.has_key('index.html'):
-        bucket.put('<!DOCTYPE html><html></html>', 'index.html')
+        bucket.put('index.html',key='index.html')
+    file=open("index.html",'w')
+    index_url = bucket.generate_url("%s/index.html"%(bucket.prefix))
 
-    index_url = bucket.generate_url('index.html')
-
-    build_dir = build_wheels(args.package, index_url, args.requirement,
-                             args.exclude)
+    build_dir = build_wheels(args.package, index_url, args.requirement, args.exclude)
     bucket.sync(build_dir)
-    bucket.put(bucket.make_index(), key='index.html')
+    file.write(bucket.make_index())
+    file.close()
+    bucket.put('index.html', key='index.html')
     shutil.rmtree(build_dir)
-
     print('Index written to:', index_url)
-
 
 if __name__ == '__main__':
     main()
