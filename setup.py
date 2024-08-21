@@ -3,16 +3,13 @@ import sys
 from setuptools import setup
 
 install_requires = [
-    'awscli >= 1.3.6',
-    'boto >= 2.38.0',
-    'yattag >= 0.9.2',
-    'wheel >= 0.23.0',
-    'pip >= 1.5.4',
-    'six >= 1.9.0',
+    'awscli >= 1.33',
+    'boto3 >= 1.34',
+    'yattag >= 1.16',
+    'wheel >= 0.37.1',
+    'pip >= 22.0.2',
+    'six >= 1.16.0',
 ]
-
-if sys.version_info < (2, 7):
-    install_requires += ['argparse >= 1.3.0']
 
 setup(
     name='mkwheelhouse',
